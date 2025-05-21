@@ -1,6 +1,17 @@
-python3 -m venv venv
-source venv/bin/activate
-python3 -m ensurepip --upgrade
-pip install -r requirements.txt
+#!/bin/bash
 
-#deactivate
+# Opret en midlertidig bash-profil for den første terminal
+TEMP_PROFILE=$(mktemp)
+echo 'export PS1=$ ' >> "$TEMP_PROFILE"
+echo "cd /home/peter/projects/elektronik/realtime_plot/" > "$TEMP_PROFILE"
+echo "source venv/bin/activate" >> "$TEMP_PROFILE"
+echo 'export PS1="(venv) $ "' >> "$TEMP_PROFILE"
+
+# Start første terminal med den midlertidige profil
+gnome-terminal -- bash --rcfile "$TEMP_PROFILE"
+gnome-terminal -- bash --rcfile "$TEMP_PROFILE"
+
+echo "rm $TEMP_PROFILE" >> "$TEMP_PROFILE"
+# Start to terminaler i hjemmekatalogen
+gnome-terminal -- bash --rcfile "$TEMP_PROFILE"
+gnome-terminal -- bash

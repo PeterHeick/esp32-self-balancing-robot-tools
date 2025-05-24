@@ -322,23 +322,44 @@ class RobotPerformanceApp:
             "ki": self.ki_var.get(),
             "kd": self.kd_var.get(),
             "init_balance": self.init_balance_var.get(),
-            "power_gain": self.power_gain_var.get()
+            "gain": self.power_gain_var.get()
         }
 
         current_params = self.session_manager.current_pid_params
         if new_pid_params != current_params:
-            self.status_widgets.update_run_status(
-                f"Anvender: KP={new_pid_params['kp']}, KI={new_pid_params['ki']}, KD={new_pid_params['kd']}, "
-                f"Init={new_pid_params['init_balance']}, Gain={new_pid_params['power_gain']}"
-            )
+            self.status_widgets.update_run_status("Sender parametre til robot...")
             
-            # Send to robot
+            # Deaktiver knap mens vi sender
+            self.apply_pid_params_button.config(state="disabled", text="Sender...")
+            
+            # Send med verification
             if self.serial_thread.is_connected():
-                self.serial_thread.send_command(f"kp={new_pid_params['kp']}")
-                self.serial_thread.send_command(f"ki={new_pid_params['ki']}")
-                self.serial_thread.send_command(f"kd={new_pid_params['kd']}")
-                self.serial_thread.send_command(f"init={new_pid_params['init_balance']}")
-                self.serial_thread.send_command(f"gain={new_pid_params['power_gain']}")
+                self.serial_thread.send_parameters_with_verification(
+                    new_pid_params, 
+                    self._handle_parameter_verification_result
+                )
+            else:
+                self.apply_pid_params_button.config(state="normal", text="Anvend Alle Parametre")
+                messagebox.showerror("Fejl", "Ingen seriel forbindelse.")
+        else:
+            self.status_widgets.update_run_status("Parametre uændrede.")
+
+    def _handle_parameter_verification_result(self, success, message):
+        """Håndter resultat af parameter verification"""
+        # Genaktiver knap
+        self.apply_pid_params_button.config(state="normal", text="Anvend Alle Parametre")
+        
+        if success:
+            print(f"PARAMETER SUCCESS: {message}")
+            
+            # Gem parametre til session og fil
+            new_pid_params = {
+                "kp": self.kp_var.get(),
+                "ki": self.ki_var.get(),
+                "kd": self.kd_var.get(),
+                "init_balance": self.init_balance_var.get(),
+                "power_gain": self.power_gain_var.get()
+            }
             
             # Start new session
             old_session_data, old_session_id, old_pid_params = self.session_manager.start_new_session(new_pid_params)
@@ -358,9 +379,14 @@ class RobotPerformanceApp:
             
             # Update GUI
             self.status_widgets.update_session_info(self.session_manager)
-            self.status_widgets.update_run_status("Alle parametre anvendt og gemt.")
+            self.status_widgets.update_run_status("✅ Alle parametre verificeret og anvendt!")
+            
         else:
-            self.status_widgets.update_run_status("Parametre uændrede.")
+            print(f"PARAMETER FEJL: {message}")
+            self.status_widgets.update_run_status(f"❌ Fejl: {message}")
+            messagebox.showerror("Parameter Fejl", 
+                f"Kunne ikke anvende parametre:\n{message}\n\n"
+                "Prøv igen eller tjek robot forbindelse.")
 
     def _send_manual_command(self):
         """Send manuel kommando"""

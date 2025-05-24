@@ -1,4 +1,25 @@
-matplotlib
-pyserial
-scipy
+# Robot Performance Analysis System - Dependencies
+# Install med: pip install -r requirements.txt
 
+# Serial kommunikation
+pyserial>=3.4
+
+# Numerisk beregning
+numpy>=1.19.0
+
+# Plotting og visualisering
+matplotlib>=3.3.0
+
+# Videnskabelige beregninger
+scipy>=1.5.0
+
+# GUI (normalt inkluderet i Python)
+# tkinter - kommer med Python
+
+# Valgfri: For bedre serial port detection
+# pyserial-tools>=0.6
+
+# Valgfri: For bedre development
+# pytest>=6.0.0  # Til testing
+# black>=21.0.0   # Til code formatting
+# flake8>=3.8.0   # Til linting

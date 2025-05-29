@@ -30,16 +30,17 @@ class DataLogger:
         file_exists = os.path.exists(filename)
         try:
             with open(filename, 'a', newline='') as f:
-                header = "Pitch,PIDout,PTerm,ITerm,DTerm\n"
+                header = "Pitch,PitchRate,pPIDout,PTerm,ITerm,DTerm\n"
                 if not file_exists or os.path.getsize(filename) == 0:
                     f.write(header)
                 
                 for data_point_tuple in run_data_list:
                     # run_data_list indeholder: (time_ms_esp, relative_s, pitch, pid_out, p, i, d)
-                    _time_ms_esp, _relative_s, pitch, pid_out, p, i, d = data_point_tuple
+                    _time_ms_esp, _relative_s, pitch, pitch_rate, pid_out, p, i, d = data_point_tuple
                     
                     f.write(
                         f"{pitch:.3f},"
+                        f"{pitch_rate:.3f},"
                         f"{pid_out:.3f},"
                         f"{p:.3f},"
                         f"{i:.3f},"

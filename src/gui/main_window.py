@@ -276,10 +276,11 @@ class RobotPerformanceApp:
             # Parse data
             time_ms_esp = float(parts[0])
             pitch = float(parts[1])
-            pid_out = float(parts[2])
-            p_term = float(parts[3])
-            i_term = float(parts[4])
-            d_term = float(parts[5])
+            pitch_rate = float(parts[2])
+            pid_out = float(parts[3])
+            p_term = float(parts[4])
+            i_term = float(parts[5])
+            d_term = float(parts[6])
 
             # Handle timing
             if self.first_data_line_in_run_received:
@@ -297,7 +298,7 @@ class RobotPerformanceApp:
             # Calculate relative time and store data
             current_time_s_relative = (time_ms_esp - self.run_start_time_esp_ms) / 1000.0
             self.current_run_data.append((
-                time_ms_esp, current_time_s_relative, pitch, pid_out, p_term, i_term, d_term
+                time_ms_esp, current_time_s_relative, pitch, pitch_rate, pid_out, p_term, i_term, d_term
             ))
             
             # Update plot data

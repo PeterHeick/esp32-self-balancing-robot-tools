@@ -12,7 +12,7 @@ SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 
 # --- CSV Data Format ---
-CSV_EXPECTED_COLUMNS_NAMES = ["time_ms", "pitch", "pid_output", "p_term", "i_term", "d_term"]
+CSV_EXPECTED_COLUMNS_NAMES = ["time_ms", "fusedPitch", "fusedPitchRate", "pid_output", "p_term", "i_term", "d_term", "scaledOutput"]
 NUM_EXPECTED_CSV_COLUMNS = len(CSV_EXPECTED_COLUMNS_NAMES)
 
 # --- Robot Behavior Thresholds ---

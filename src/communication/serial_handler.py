@@ -127,7 +127,7 @@ class SerialThread(threading.Thread):
     def _handle_potential_pid_response(self, line):
         """Håndter potentielt PID response fra robot"""
         # Check for både "KP=" og "KP:" formater samt Init og Power Gain
-        has_pid = ("KP=" in line or "KP:" in line) and ("KI=" in line or "KI:" in line) and ("KD=" in line or "KD:" in line)
+        has_pid = ("KP:" in line and "KI:" in line and "KD:" in line)
         
         if has_pid:
             try:
@@ -153,13 +153,13 @@ class SerialThread(threading.Thread):
     def _parse_pid_response(self, line):
         """Parse PID værdier fra robot response - OPDATERET til at finde alle parametre"""
         # Find KP, KI, KD værdier med regex - støt både "=" og ":" format
-        kp_match = re.search(r'KP[=:\s]+([0-9.]+)', line, re.IGNORECASE)
-        ki_match = re.search(r'KI[=:\s]+([0-9.]+)', line, re.IGNORECASE)
-        kd_match = re.search(r'KD[=:\s]+([0-9.]+)', line, re.IGNORECASE)
+        kp_match = re.search(r'KP[:\s]+([0-9.]+)', line, re.IGNORECASE)
+        ki_match = re.search(r'KI[:\s]+([0-9.]+)', line, re.IGNORECASE)
+        kd_match = re.search(r'KD[:\s]+([0-9.]+)', line, re.IGNORECASE)
         
         # Find Init Balance og Power Gain (forskellige mulige navne)
-        init_match = re.search(r'(?:Init|InitBal|Initial)[=:\s]+([0-9.-]+)', line, re.IGNORECASE)
-        power_match = re.search(r'(?:Pow|Power|Gain)[=:\s]+([0-9.-]+)', line, re.IGNORECASE)
+        init_match = re.search(r'InitBal:\s+([0-9.-]+)', line, re.IGNORECASE)
+        power_match = re.search(r'Gain:\s+([0-9.-]+)', line, re.IGNORECASE)
         
         if kp_match and ki_match and kd_match:
             try:

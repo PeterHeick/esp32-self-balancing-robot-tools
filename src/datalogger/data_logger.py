@@ -30,22 +30,49 @@ class DataLogger:
         file_exists = os.path.exists(filename)
         try:
             with open(filename, 'a', newline='') as f:
-                header = "Pitch,PitchRate,pPIDout,PTerm,ITerm,DTerm\n"
+                # Opdateret header med position control
+                header = "Time_ms,Pitch,PitchRate,BalanceCmd,PTerm,ITerm,DTerm,ScaledOutput,Position,PositionSetpoint,PositionError,PositionOutput,PositionCorrection\n"
                 if not file_exists or os.path.getsize(filename) == 0:
                     f.write(header)
                 
                 for data_point_tuple in run_data_list:
-                    # run_data_list indeholder: (time_ms_esp, relative_s, pitch, pid_out, p, i, d)
-                    _time_ms_esp, _relative_s, pitch, pitch_rate, pid_out, p, i, d = data_point_tuple
-                    
-                    f.write(
-                        f"{pitch:.3f},"
-                        f"{pitch_rate:.3f},"
-                        f"{pid_out:.3f},"
-                        f"{p:.3f},"
-                        f"{i:.3f},"
-                        f"{d:.3f}\n"
-                    )
+                    # Håndter både gamle og nye format
+                    if len(data_point_tuple) == 8:
+                        # Gammelt format: (time_ms_esp, relative_s, pitch, pitch_rate, pid_out, p, i, d)
+                        time_ms_esp, _relative_s, pitch, pitch_rate, balance_cmd, p, i, d = data_point_tuple
+                        f.write(
+                            f"{time_ms_esp:.0f},"
+                            f"{pitch:.3f},"
+                            f"{pitch_rate:.3f},"
+                            f"{balance_cmd:.3f},"
+                            f"{p:.3f},"
+                            f"{i:.3f},"
+                            f"{d:.3f},"
+                            f"0.000,"  # scaled_output placeholder
+                            f"0.000,"  # position placeholder
+                            f"0.000,"  # position_setpoint placeholder
+                            f"0.000,"  # position_error placeholder
+                            f"0.000,"  # position_output placeholder
+                            f"0.000\n"  # position_correction placeholder
+                        )
+                    else:
+                        # Nyt format: (time_ms_esp, relative_s, pitch, pitch_rate, balance_cmd, p, i, d, scaled_output, position, pos_setpoint, pos_error, pos_output, pos_correction)
+                        time_ms_esp, _relative_s, pitch, pitch_rate, balance_cmd, p, i, d, scaled_output, position, pos_setpoint, pos_error, pos_output, pos_correction = data_point_tuple
+                        f.write(
+                            f"{time_ms_esp:.0f},"
+                            f"{pitch:.3f},"
+                            f"{pitch_rate:.3f},"
+                            f"{balance_cmd:.3f},"
+                            f"{p:.3f},"
+                            f"{i:.3f},"
+                            f"{d:.3f},"
+                            f"{scaled_output:.3f},"
+                            f"{position:.3f},"
+                            f"{pos_setpoint:.3f},"
+                            f"{pos_error:.3f},"
+                            f"{pos_output:.3f},"
+                            f"{pos_correction:.3f}\n"
+                        )
             
             print(f"ROBOT INFO: Detaljeret kørsel logget til {filename}")
             return True
@@ -70,8 +97,8 @@ class DataLogger:
         try:
             with open(filename, 'a', newline='') as f:
                 header = ("LogTimestamp,SessionID,KP,KI,KD,NumRuns,AvgScore,"
-                         "MaxScore,MinScore,AvgTimeUpright_s,AvgTotalDuration_s,"
-                         "AvgPitchDev_deg,AvgStability_deg\n")
+                         "MaxScore,MinScore,AvgValidTime_s,AvgTotalDuration_s,"
+                         "AvgAmplitudeRMS_deg,AvgFrequency_Hz,AvgDegradation\n")
                 
                 if not file_exists or os.path.getsize(filename) == 0:
                     f.write(header)
@@ -89,10 +116,11 @@ class DataLogger:
                     f"{session_stats['avg_score']:.2f},"
                     f"{session_stats.get('max_score', 0):.2f},"
                     f"{session_stats.get('min_score', 0):.2f},"
-                    f"{session_stats['avg_time_upright']:.2f},"
+                    f"{session_stats['avg_valid_time']:.2f},"
                     f"{session_stats['avg_total_duration']:.2f},"
-                    f"{format_metric(session_stats['avg_pitch_dev'])},"
-                    f"{format_metric(session_stats['avg_stability_metric'])}\n"
+                    f"{format_metric(session_stats.get('avg_amplitude_rms', float('inf')))},"
+                    f"{session_stats.get('avg_frequency', 0):.2f},"
+                    f"{session_stats.get('avg_degradation', 0):.3f}\n"
                 )
                 f.write(data_row)
             

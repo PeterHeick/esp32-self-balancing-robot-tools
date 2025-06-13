@@ -4,14 +4,17 @@ Score beregning og analyse af robot performance data
 """
 
 import numpy as np
+from scipy import signal
 from config.settings import (
     BALANCED_PITCH_THRESHOLD_DEG,
     MIN_VALID_RUN_DURATION_S,
-    SCORE_TIME_UPRIGHT_MULTIPLIER,
-    SCORE_PITCH_DEV_MULTIPLIER,
-    SCORE_STABILITY_MULTIPLIER,
-    SCORE_UPRIGHT_RATIO_MULTIPLIER,
-    SCORE_MIN_RUN_DURATION_MULTIPLIER
+    MAX_OSCILLATION_CUTOFF_DEG,
+    MAX_OSCILLATION_AMPLITUDE_RMS,
+    SCORE_BASE_TIME_MULTIPLIER,
+    SCORE_OSCILLATION_AMPLITUDE_PENALTY,
+    SCORE_OSCILLATION_FREQUENCY_PENALTY,
+    SCORE_DEGRADATION_PENALTY,
+    OSCILLATION_WINDOW_SIZE_S
 )
 
 
@@ -23,16 +26,16 @@ class ScoreCalculator:
     @staticmethod
     def calculate_run_score(run_data):
         """
-        Beregn score for en enkelt testkørsel
+        Beregn oscillation-baseret score for en enkelt testkørsel
         
         Args:
-            run_data: Liste af tuples (time_ms_esp, relative_time_s, pitch, pid_out, p, i, d)
+            run_data: Liste af tuples - bagudkompatibel med både gamle og nye format
             
         Returns:
-            tuple: (score, time_upright, total_duration, avg_abs_pitch_dev, stability_metric)
+            tuple: (score, valid_time, total_duration, oscillation_metrics)
         """
         if not run_data:
-            return 0, 0, 0, float('inf'), float('inf')
+            return 0, 0, 0, {}
         
         # Udtræk data arrays
         esp_timestamps = np.array([item[0] for item in run_data])
@@ -40,100 +43,143 @@ class ScoreCalculator:
         pitches = np.array([item[2] for item in run_data])
         
         if run_timestamps_relative.size == 0:
-            return 0, 0, 0, float('inf'), float('inf')
+            return 0, 0, 0, {}
 
         # Beregn total varighed
         total_duration = run_timestamps_relative[-1] if run_timestamps_relative.size > 0 else 0
         
-        # Beregn tid oprejst
-        time_upright = ScoreCalculator._calculate_time_upright(
-            run_timestamps_relative, pitches
-        )
+        # Find valid scoring period (før store oscillationer)
+        valid_end_idx = ScoreCalculator._find_oscillation_cutoff(pitches)
         
-        # Beregn pitch statistikker
-        avg_abs_pitch_dev, stability_metric = ScoreCalculator._calculate_pitch_stats(pitches)
+        if valid_end_idx == 0:
+            return 0, 0, total_duration, {'reason': 'immediate_cutoff'}
+            
+        # Brug kun valid data
+        valid_timestamps = run_timestamps_relative[:valid_end_idx]
+        valid_pitches = pitches[:valid_end_idx]
+        valid_time = valid_timestamps[-1] if valid_timestamps.size > 0 else 0
+        
+        # Check minimum duration requirement
+        if valid_time < MIN_VALID_RUN_DURATION_S:
+            return 0, valid_time, total_duration, {'reason': 'too_short', 'required': MIN_VALID_RUN_DURATION_S}
+        
+        # Beregn oscillation metrics
+        oscillation_metrics = ScoreCalculator._analyze_oscillations(
+            valid_timestamps, valid_pitches
+        )
         
         # Beregn samlet score
-        score = ScoreCalculator._calculate_total_score(
-            time_upright, total_duration, avg_abs_pitch_dev, stability_metric
+        score = ScoreCalculator._calculate_oscillation_score(
+            valid_time, oscillation_metrics
         )
         
-        print(f"ROBOT INFO: Kørsel score: {score:.2f} "
-              f"(Tid Oprejst: {time_upright:.2f}s, "
-              f"Total Varighed: {total_duration:.2f}s, "
-              f"Gns. Pitch Dev: {avg_abs_pitch_dev:.3f} deg, "
-              f"Stabilitet: {stability_metric:.3f} deg)")
+        print(f"ROBOT INFO: Oscillation Score: {score:.2f} "
+              f"(Valid Tid: {valid_time:.2f}s, "
+              f"RMS Amp: {oscillation_metrics.get('amplitude_rms', 0):.3f}°, "
+              f"Freq: {oscillation_metrics.get('avg_frequency', 0):.2f} Hz, "
+              f"Degradation: {oscillation_metrics.get('degradation_factor', 0):.3f})")
         
         # Begræns score til rimelig interval
         score = max(-1000, min(1000, score))
         
-        return score, time_upright, total_duration, avg_abs_pitch_dev, stability_metric
+        return score, valid_time, total_duration, oscillation_metrics
 
     @staticmethod
-    def _calculate_time_upright(timestamps, pitches):
-        """Beregn total tid robotten var oprejst"""
-        time_upright = 0
-        is_upright_sample = np.abs(pitches) < BALANCED_PITCH_THRESHOLD_DEG
+    def _find_oscillation_cutoff(pitches):
+        """Find punkt hvor oscillationer bliver for store"""
+        for i, pitch in enumerate(pitches):
+            if abs(pitch) > MAX_OSCILLATION_CUTOFF_DEG:
+                return i
+        return len(pitches)
+    
+    @staticmethod
+    def _analyze_oscillations(timestamps, pitches):
+        """Analysér oscillation amplitude, frekvens og degradation"""
+        if len(timestamps) < 10:
+            return {'amplitude_rms': float('inf'), 'avg_frequency': 0, 'degradation_factor': 0}
         
-        if timestamps.size > 1:
-            dt_intervals = np.diff(timestamps)
-            time_upright = np.sum(dt_intervals[is_upright_sample[:-1]])
+        # Beregn RMS amplitude
+        amplitude_rms = np.sqrt(np.mean(pitches**2))
+        
+        # Find peaks for frekvens-analyse
+        try:
+            dt = np.mean(np.diff(timestamps)) if len(timestamps) > 1 else 0.015
+            sampling_rate = 1.0 / dt if dt > 0 else 66.67
             
-            # Tilføj sidste interval hvis robot stadig er oprejst
-            if is_upright_sample[-1]:
-                time_upright += np.mean(dt_intervals) if dt_intervals.size > 0 else 0.015
-                
-        elif timestamps.size == 1 and is_upright_sample[0]:
-            time_upright = 0.015  # Antag kort sample interval
-            
-        return time_upright
+            peaks, _ = signal.find_peaks(np.abs(pitches), height=0.5)
+            if len(peaks) > 1:
+                peak_intervals = np.diff(peaks) * dt
+                avg_frequency = 1.0 / np.mean(peak_intervals) if len(peak_intervals) > 0 else 0
+            else:
+                avg_frequency = 0
+        except:
+            avg_frequency = 0
+        
+        # Analysér degradation (forværring over tid)
+        degradation_factor = ScoreCalculator._calculate_degradation(timestamps, pitches)
+        
+        return {
+            'amplitude_rms': amplitude_rms,
+            'avg_frequency': avg_frequency,
+            'degradation_factor': degradation_factor
+        }
 
     @staticmethod
-    def _calculate_pitch_stats(pitches):
-        """Beregn pitch statistikker for oprejste perioder"""
-        is_upright_sample = np.abs(pitches) < BALANCED_PITCH_THRESHOLD_DEG
-        upright_pitches = pitches[is_upright_sample]
+    def _calculate_degradation(timestamps, pitches):
+        """Beregn om oscillationer forværres over tid"""
+        if len(timestamps) < int(2 * OSCILLATION_WINDOW_SIZE_S / 0.015):  # Mindst 2 vinduer
+            return 0
         
-        # Gennemsnitlig absolut pitch deviation
-        avg_abs_pitch_dev = (
-            np.mean(np.abs(upright_pitches)) 
-            if upright_pitches.size > 0 
-            else float('inf')
-        )
-        
-        # Stabilitet (standardafvigelse)
-        stability_metric = (
-            np.std(upright_pitches) 
-            if upright_pitches.size > 1 
-            else float('inf')
-        )
-        
-        return avg_abs_pitch_dev, stability_metric
+        try:
+            # Del data i vinduer
+            dt = np.mean(np.diff(timestamps)) if len(timestamps) > 1 else 0.015
+            window_samples = int(OSCILLATION_WINDOW_SIZE_S / dt)
+            
+            if window_samples < 10:
+                return 0
+            
+            # Beregn RMS for første og sidste vindue
+            start_window = pitches[:window_samples]
+            end_window = pitches[-window_samples:]
+            
+            start_rms = np.sqrt(np.mean(start_window**2))
+            end_rms = np.sqrt(np.mean(end_window**2))
+            
+            # Degradation factor (positiv hvis det bliver værre)
+            degradation = (end_rms - start_rms) / max(start_rms, 0.1)
+            return max(0, degradation)  # Kun straf hvis det bliver værre
+            
+        except:
+            return 0
 
     @staticmethod
-    def _calculate_total_score(time_upright, total_duration, avg_abs_pitch_dev, stability_metric):
-        """Beregn samlet score baseret på forskellige faktorer"""
-        score = time_upright * SCORE_TIME_UPRIGHT_MULTIPLIER
+    def _calculate_oscillation_score(valid_time, oscillation_metrics):
+        """Beregn score baseret kun på oscillation-kvalitet (tids-uafhængig)"""
+        # Start med perfect score
+        score = 1000
         
-        # Træk fra for pitch deviation
-        if avg_abs_pitch_dev != float('inf'):
-            score -= avg_abs_pitch_dev * SCORE_PITCH_DEV_MULTIPLIER
-            
-        # Træk fra for ustabilitet
-        if stability_metric != float('inf'):
-            score -= stability_metric * SCORE_STABILITY_MULTIPLIER
-            
-        # Bonus for høj oprejst ratio
-        if total_duration > 0.1:
-            upright_ratio = time_upright / total_duration
-            score += upright_ratio * SCORE_UPRIGHT_RATIO_MULTIPLIER
-        else:
-            score -= SCORE_UPRIGHT_RATIO_MULTIPLIER
-            
-        # Straf for for kort kørsel
-        if time_upright < MIN_VALID_RUN_DURATION_S:
-            score -= SCORE_MIN_RUN_DURATION_MULTIPLIER
-            
+        # Straf for oscillation amplitude
+        amplitude_rms = oscillation_metrics.get('amplitude_rms', 0)
+        if amplitude_rms != float('inf'):
+            score -= amplitude_rms * SCORE_OSCILLATION_AMPLITUDE_PENALTY
+        
+        # Straf for høj frekvens (ustabil)
+        avg_frequency = oscillation_metrics.get('avg_frequency', 0)
+        if avg_frequency > 1.0:  # Over 1 Hz er ustabilt
+            score -= (avg_frequency - 1.0) * SCORE_OSCILLATION_FREQUENCY_PENALTY
+        
+        # Straf for degradation over tid
+        degradation = oscillation_metrics.get('degradation_factor', 0)
+        score -= degradation * SCORE_DEGRADATION_PENALTY
+        
+        # Bonus for meget lav amplitude (meget stabil)
+        if amplitude_rms < 1.0:
+            score += (1.0 - amplitude_rms) * 50  # Øget bonus for stabilitet
+        
+        # Bonus for lav frekvens (rolig balance)
+        if avg_frequency < 0.5:
+            score += (0.5 - avg_frequency) * 30
+        
         return score
 
     @staticmethod
@@ -142,8 +188,7 @@ class ScoreCalculator:
         Beregn statistikker for en hel session
         
         Args:
-            session_run_details: Liste af (score, time_upright, total_duration, 
-                                          avg_abs_pitch_dev, stability_metric) tuples
+            session_run_details: Liste af (score, valid_time, total_duration, oscillation_metrics) tuples
                                           
         Returns:
             dict: Session statistikker
@@ -153,20 +198,32 @@ class ScoreCalculator:
             
         num_runs = len(session_run_details)
         scores = [d[0] for d in session_run_details]
-        times_upright = [d[1] for d in session_run_details]
+        valid_times = [d[1] for d in session_run_details]
         total_durations = [d[2] for d in session_run_details]
         
-        # Filtrer ugyldige værdier
-        valid_pitch_devs = [d[3] for d in session_run_details if d[3] != float('inf')]
-        valid_stability_metrics = [d[4] for d in session_run_details if d[4] != float('inf')]
+        # Saml oscillation metrics
+        amplitudes = []
+        frequencies = []
+        degradations = []
+        
+        for d in session_run_details:
+            if len(d) > 3 and isinstance(d[3], dict):
+                metrics = d[3]
+                if 'amplitude_rms' in metrics and metrics['amplitude_rms'] != float('inf'):
+                    amplitudes.append(metrics['amplitude_rms'])
+                if 'avg_frequency' in metrics:
+                    frequencies.append(metrics['avg_frequency'])
+                if 'degradation_factor' in metrics:
+                    degradations.append(metrics['degradation_factor'])
         
         return {
             'num_runs': num_runs,
             'avg_score': np.mean(scores),
             'max_score': np.max(scores),
             'min_score': np.min(scores),
-            'avg_time_upright': np.mean(times_upright),
+            'avg_valid_time': np.mean(valid_times),
             'avg_total_duration': np.mean(total_durations),
-            'avg_pitch_dev': np.mean(valid_pitch_devs) if valid_pitch_devs else float('inf'),
-            'avg_stability_metric': np.mean(valid_stability_metrics) if valid_stability_metrics else float('inf')
+            'avg_amplitude_rms': np.mean(amplitudes) if amplitudes else float('inf'),
+            'avg_frequency': np.mean(frequencies) if frequencies else 0,
+            'avg_degradation': np.mean(degradations) if degradations else 0
         }

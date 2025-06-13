@@ -11,6 +11,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import datetime
 import time
+import subprocess
+import os
+import glob
 
 from config.settings import *
 from communication.serial_handler import SerialThread
@@ -30,8 +33,12 @@ class RobotPerformanceApp:
         self.root.title(f"RobotPerformanceScore.py v0.9 (Session-based CSV logs @{TARGET_LOOP_TIME_MS:.0f}ms)")
         
         # Core components - indlæs gemte PID værdier først
-        saved_pid_params = load_pid_settings()
+        saved_pid_params, saved_best_config = load_pid_settings()
         self.session_manager = SessionManager(saved_pid_params)
+        
+        # Sæt bedste konfiguration hvis tilgængelig
+        if saved_best_config:
+            self.session_manager.set_best_config(saved_best_config)
         self.data_logger = DataLogger()
         self.score_calculator = ScoreCalculator()
         
@@ -101,7 +108,7 @@ class RobotPerformanceApp:
         param_frame.grid(row=0, column=0, padx=0, pady=(0,10), sticky="ew")
         
         # Hent gemte PID parametre
-        saved_pid_params = load_pid_settings()
+        saved_pid_params, _ = load_pid_settings()
         
         # KP
         ttk.Label(param_frame, text="KP:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
@@ -136,7 +143,7 @@ class RobotPerformanceApp:
             param_frame, text="Anvend Alle Parametre", 
             command=self._apply_pid_parameters
         )
-        self.apply_pid_params_button.grid(row=6, column=0, columnspan=2, pady=(10,5))
+        self.apply_pid_params_button.grid(row=12, column=0, columnspan=2, pady=(10,5))
 
     def _setup_manual_controls(self, parent):
         """Setup manual command controls"""
@@ -162,7 +169,7 @@ class RobotPerformanceApp:
             command=self._save_parameters_on_robot
         )
         self.save_to_robot_button.grid(row=1, column=0, columnspan=2, padx=5, pady=(5,5), sticky="ew")
-
+        
     def _setup_test_controls(self, parent):
         """Setup test control buttons"""
         control_frame = ttk.LabelFrame(parent, text="Test Kontrol")
@@ -180,6 +187,13 @@ class RobotPerformanceApp:
             command=self._print_current_session
         )
         self.print_session_button.pack(pady=5, padx=5, fill="x")
+        
+        # Tilføj Åbn Grafplot knap
+        self.open_grafplot_button = ttk.Button(
+            control_frame, text="Åbn Grafplot (Seneste Session)", 
+            command=self._open_grafplot_latest_session
+        )
+        self.open_grafplot_button.pack(pady=5, padx=5, fill="x")
 
     def _setup_plot(self, parent):
         """Setup matplotlib plot"""
@@ -269,26 +283,25 @@ class RobotPerformanceApp:
         csv_data_part = line[len(TAG_CSV):].strip()
         try:
             parts = csv_data_part.split(',')
-            if len(parts) != NUM_EXPECTED_CSV_COLUMNS:
-                print(f"ROBOT WARNING (Malformed CSV - wrong column count): {line}")
+            
+            # Bagudkompatibel: Accepter både gamle (8 kolonner) og nye (13 kolonner) format
+            if len(parts) != 8:
+                print(f"ROBOT WARNING (Malformed CSV - expected 8 or 13 columns, got {len(parts)}): {line}")
                 return
-                
-            # Parse data
+
             time_ms_esp = float(parts[0])
             pitch = float(parts[1])
             pitch_rate = float(parts[2])
-            pid_out = float(parts[3])
+            balance_cmd = float(parts[3])  # var pid_output før
             p_term = float(parts[4])
             i_term = float(parts[5])
             d_term = float(parts[6])
+            scaled_output = float(parts[7])
 
             # Handle timing
             if self.first_data_line_in_run_received:
                 if self.previous_csv_timestamp_ms is not None:
                     interval_ms = time_ms_esp - self.previous_csv_timestamp_ms
-                    if interval_ms > LOOP_TIME_WARNING_THRESHOLD_MS:
-                        print(f"ROBOT WARNING: Loop tid på ESP32 > {TARGET_LOOP_TIME_MS:.0f}ms! "
-                              f"Interval: {interval_ms:.1f} ms (ESP Timestamp: {time_ms_esp:.0f})")
                 self.previous_csv_timestamp_ms = time_ms_esp
             else:
                 self.run_start_time_esp_ms = time_ms_esp
@@ -298,7 +311,8 @@ class RobotPerformanceApp:
             # Calculate relative time and store data
             current_time_s_relative = (time_ms_esp - self.run_start_time_esp_ms) / 1000.0
             self.current_run_data.append((
-                time_ms_esp, current_time_s_relative, pitch, pitch_rate, pid_out, p_term, i_term, d_term
+                time_ms_esp, current_time_s_relative, pitch, pitch_rate, balance_cmd, p_term, i_term, d_term,
+                scaled_output
             ))
             
             # Update plot data
@@ -323,10 +337,11 @@ class RobotPerformanceApp:
             "ki": self.ki_var.get(),
             "kd": self.kd_var.get(),
             "init_balance": self.init_balance_var.get(),
-            "gain": self.power_gain_var.get()
+            "power_gain": self.power_gain_var.get(),
         }
 
         current_params = self.session_manager.current_pid_params
+        
         if new_pid_params != current_params:
             self.status_widgets.update_run_status("Sender parametre til robot...")
             
@@ -359,7 +374,7 @@ class RobotPerformanceApp:
                 "ki": self.ki_var.get(),
                 "kd": self.kd_var.get(),
                 "init_balance": self.init_balance_var.get(),
-                "power_gain": self.power_gain_var.get()
+                "power_gain": self.power_gain_var.get(),
             }
             
             # Start new session
@@ -370,12 +385,14 @@ class RobotPerformanceApp:
                 self._log_session_results(old_session_data, old_session_id, old_pid_params)
             
             # GEM alle parametre til fil
+            best_config = self.session_manager.get_best_config()
             save_pid_settings(
                 new_pid_params['kp'], 
                 new_pid_params['ki'], 
                 new_pid_params['kd'],
                 new_pid_params['init_balance'],
-                new_pid_params['power_gain']
+                new_pid_params['power_gain'],
+                best_config
             )
             
             # Update GUI
@@ -438,7 +455,7 @@ class RobotPerformanceApp:
             "ki": self.ki_var.get(),
             "kd": self.kd_var.get(),
             "init_balance": self.init_balance_var.get(),
-            "power_gain": self.power_gain_var.get()
+            "power_gain": self.power_gain_var.get(),
         }
         
         if gui_pid_params != self.session_manager.current_pid_params:
@@ -509,14 +526,23 @@ class RobotPerformanceApp:
 
         # Calculate score
         run_results = self.score_calculator.calculate_run_score(self.current_run_data)
-        score, time_upright, total_duration, avg_abs_pitch_dev, stability_metric = run_results
+        score, valid_time, total_duration, oscillation_metrics = run_results
         
         # Update GUI with results
-        self.status_widgets.update_run_results(score, time_upright)
+        self.status_widgets.update_run_results(score, valid_time)
 
         # Add to session if valid
-        if time_upright >= MIN_VALID_RUN_DURATION_S:
+        if valid_time >= MIN_VALID_RUN_DURATION_S:
+            # Gem tidligere bedste score for sammenligning
+            previous_best = self.session_manager.get_best_config()
+            previous_best_score = previous_best['avg_score'] if previous_best else float('-inf')
+            
             self.session_manager.add_run_result(run_results)
+            
+            # Check om der er ny bedste konfiguration
+            current_best = self.session_manager.get_best_config()
+            if current_best and current_best['avg_score'] > previous_best_score:
+                self.status_widgets.highlight_new_best_config()
             
             # Log detailed data
             self.data_logger.write_detailed_run_data(
@@ -529,7 +555,7 @@ class RobotPerformanceApp:
         else:
             self.status_widgets.update_run_status(
                 f"Testkørsel stoppet: {reason}. "
-                f"Kørsel for kort ({time_upright:.2f}s) til session/log."
+                f"Kørsel for kort ({valid_time:.2f}s) til session/log."
             )
 
     def _log_session_results(self, session_data, session_id, pid_params):
@@ -600,14 +626,16 @@ class RobotPerformanceApp:
                 "ki": self.ki_var.get(),
                 "kd": self.kd_var.get(),
                 "init_balance": self.init_balance_var.get(),
-                "power_gain": self.power_gain_var.get()
+                "power_gain": self.power_gain_var.get(),
             }
+            best_config = self.session_manager.get_best_config()
             save_pid_settings(
                 current_params['kp'], 
                 current_params['ki'], 
                 current_params['kd'],
                 current_params['init_balance'],
-                current_params['power_gain']
+                current_params['power_gain'],
+                best_config
             )
             print("Alle parametre gemt før lukning")
             
@@ -709,16 +737,18 @@ class RobotPerformanceApp:
                     "ki": pid_params['ki'],
                     "kd": pid_params['kd'],
                     "init_balance": pid_params.get('init_balance', self.init_balance_var.get()),
-                    "power_gain": pid_params.get('power_gain', self.power_gain_var.get())
+                    "power_gain": pid_params.get('power_gain', self.power_gain_var.get()),
                 }
                 
                 # Gem til fil for næste gang
+                best_config = self.session_manager.get_best_config()
                 save_pid_settings(
                     full_params['kp'], 
                     full_params['ki'], 
                     full_params['kd'],
                     full_params['init_balance'],
-                    full_params['power_gain']
+                    full_params['power_gain'],
+                    best_config
                 )
                 
                 # Opdater session manager hvis forskelligt fra current
@@ -734,6 +764,76 @@ class RobotPerformanceApp:
             print(f"FEJL i _handle_pid_from_robot: {e}")
             import traceback
             traceback.print_exc()
+
+    def _find_latest_session_file(self):
+        """Find den seneste session detailed CSV fil"""
+        try:
+            # Find alle session_*_detailed.csv filer
+            pattern = os.path.join(DATA_DIR, "session_*_detailed.csv")
+            session_files = glob.glob(pattern)
+            
+            if not session_files:
+                return None
+            
+            # Sorter efter ændringsdato (seneste først)
+            session_files.sort(key=os.path.getmtime, reverse=True)
+            latest_file = session_files[0]
+            
+            print(f"Seneste session fil fundet: {latest_file}")
+            return latest_file
+            
+        except Exception as e:
+            print(f"Fejl ved søgning efter session filer: {e}")
+            return None
+
+    def _open_grafplot_latest_session(self):
+        """Åbn grafplot.py med den seneste session fil"""
+        try:
+            # Find seneste session fil
+            latest_session_file = self._find_latest_session_file()
+            
+            if not latest_session_file:
+                messagebox.showwarning(
+                    "Ingen Session Filer", 
+                    "Ingen session filer fundet i data/ mappen.\n"
+                    "Kør en test først for at generere data."
+                )
+                return
+            
+            # Kontroller at grafplot.py eksisterer
+            grafplot_path = "grafplot.py"
+            if not os.path.exists(grafplot_path):
+                messagebox.showerror(
+                    "Grafplot Ikke Fundet",
+                    f"grafplot.py ikke fundet i {os.getcwd()}\n"
+                    "Sørg for at filen eksisterer."
+                )
+                return
+            
+            # Start grafplot.py med session filen
+            cmd = ["python", grafplot_path, "--file", latest_session_file]
+            
+            print(f"Starter grafplot.py med kommando: {' '.join(cmd)}")
+            
+            # Start som separat proces
+            subprocess.Popen(cmd, cwd=os.getcwd())
+            
+            # Vis besked til bruger
+            session_name = os.path.basename(latest_session_file)
+            messagebox.showinfo(
+                "Grafplot Startet", 
+                f"Grafplot.py er startet med:\n{session_name}\n\n"
+                "Grafplot åbner i et nyt vindue."
+            )
+            
+        except Exception as e:
+            print(f"Fejl ved start af grafplot: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Fejl", 
+                f"Kunne ikke starte grafplot.py:\n{e}"
+            )
 
     def _print_current_session(self):
         """Print nuværende session resultat til console og log fil"""
@@ -768,18 +868,28 @@ class RobotPerformanceApp:
             print(f"  Gennemsnit Score: {session_stats['avg_score']:.2f}")
             print(f"  Højeste Score: {session_stats.get('max_score', 0):.2f}")
             print(f"  Laveste Score: {session_stats.get('min_score', 0):.2f}")
-            print(f"  Gns. Tid Oprejst: {session_stats['avg_time_upright']:.2f}s")
+            print(f"  Gns. Valid Tid: {session_stats['avg_valid_time']:.2f}s")
             print(f"  Gns. Total Varighed: {session_stats['avg_total_duration']:.2f}s")
             
-            if session_stats['avg_pitch_dev'] != float('inf'):
-                print(f"  Gns. Pitch Deviation: {session_stats['avg_pitch_dev']:.3f}°")
-            if session_stats['avg_stability_metric'] != float('inf'):
-                print(f"  Gns. Stabilitet: {session_stats['avg_stability_metric']:.3f}°")
+            if session_stats['avg_amplitude_rms'] != float('inf'):
+                print(f"  Gns. Oscillation Amplitude: {session_stats['avg_amplitude_rms']:.3f}°")
+            if session_stats['avg_frequency'] > 0:
+                print(f"  Gns. Oscillation Frekvens: {session_stats['avg_frequency']:.2f} Hz")
+            if session_stats['avg_degradation'] > 0:
+                print(f"  Gns. Degradation: {session_stats['avg_degradation']:.3f}")
             
             print("\nIndividuelle kørsler:")
-            for i, (score, time_upright, total_duration, pitch_dev, stability) in enumerate(session_data, 1):
-                print(f"  Kørsel {i}: Score={score:.2f}, Oprejst={time_upright:.2f}s, "
-                      f"Total={total_duration:.2f}s")
+            for i, run_result in enumerate(session_data, 1):
+                if len(run_result) >= 4:
+                    score, valid_time, total_duration, metrics = run_result
+                    amp = metrics.get('amplitude_rms', 0) if isinstance(metrics, dict) else 0
+                    print(f"  Kørsel {i}: Score={score:.2f}, Valid={valid_time:.2f}s, "
+                          f"Total={total_duration:.2f}s, Amp={amp:.2f}°")
+                else:
+                    # Fallback for gamle data
+                    score, time_upright, total_duration = run_result[:3]
+                    print(f"  Kørsel {i}: Score={score:.2f}, Oprejst={time_upright:.2f}s, "
+                          f"Total={total_duration:.2f}s")
             
             print("="*60)
             
@@ -789,6 +899,25 @@ class RobotPerformanceApp:
                 session_info['session_id'], 
                 session_info['pid_params']
             )
+            
+            # Gem også PID indstillinger med opdateret bedste config
+            current_params = {
+                "kp": self.kp_var.get(),
+                "ki": self.ki_var.get(),
+                "kd": self.kd_var.get(),
+                "init_balance": self.init_balance_var.get(),
+                "power_gain": self.power_gain_var.get(),
+            }
+            best_config = self.session_manager.get_best_config()
+            save_pid_settings(
+                current_params['kp'], 
+                current_params['ki'], 
+                current_params['kd'],
+                current_params['init_balance'],
+                current_params['power_gain'],
+                best_config
+            )
+            print("PID indstillinger gemt ved session udskrift")
             
             # Vis besked til bruger
             messagebox.showinfo(

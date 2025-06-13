@@ -78,6 +78,20 @@ class StatusWidgets:
             text="Session PID: KP=3.30, KI=0.00, KD=0.20"
         )
         self.session_pid_label.grid(row=7, column=0, sticky="w", padx=5, pady=2)
+        
+        # Bedste konfiguration
+        self.best_config_label = ttk.Label(
+            status_frame, 
+            text="Bedste Config: Ingen data"
+        )
+        self.best_config_label.grid(row=8, column=0, sticky="w", padx=5, pady=2)
+        
+        # Bedste config details
+        self.best_config_details_label = ttk.Label(
+            status_frame, 
+            text=""
+        )
+        self.best_config_details_label.grid(row=9, column=0, sticky="w", padx=5, pady=2)
 
     def _initialize_status(self):
         """Initialiser status med session manager data"""
@@ -121,6 +135,9 @@ class StatusWidgets:
             self.session_avg_score_label.config(text=f"Session Gns. Score: {session_stats['avg_score']:.2f}")
         else:
             self.session_avg_score_label.config(text="Session Gns. Score: -")
+        
+        # Bedste konfiguration
+        self._update_best_config_display(session_manager)
 
     def get_status_summary(self):
         """Få sammendrag af nuværende status"""
@@ -128,7 +145,8 @@ class StatusWidgets:
             'serial_status': self.serial_status_label.cget("text"),
             'run_status': self.run_status_label.cget("text"),
             'current_score': self.current_run_score_label.cget("text"),
-            'session_info': self.session_info_label.cget("text")
+            'session_info': self.session_info_label.cget("text"),
+            'best_config': self.best_config_label.cget("text")
         }
 
     def reset_run_results(self):
@@ -165,3 +183,42 @@ class StatusWidgets:
         # Gendan normal farve efter 3 sekunder
         self.run_status_label.after(3000,
             lambda: self.run_status_label.config(foreground=original_color))
+    
+    def _update_best_config_display(self, session_manager):
+        """Opdater visning af bedste konfiguration"""
+        best_config = session_manager.get_best_config()
+        
+        if best_config is None:
+            self.best_config_label.config(text="Bedste Config: Ingen data")
+            self.best_config_details_label.config(text="")
+            return
+        
+        # Hovedlinje med score
+        avg_score = best_config.get('avg_score', 0)
+        session_id = best_config.get('session_id', '?')
+        self.best_config_label.config(
+            text=f"Bedste Config: Score {avg_score:.2f} (Session #{session_id})"
+        )
+        
+        # Detaljer med PID parametre
+        pid_params = best_config.get('pid_params', {})
+        if pid_params:
+            kp = pid_params.get('kp', 0)
+            ki = pid_params.get('ki', 0)
+            kd = pid_params.get('kd', 0)
+            power_gain = pid_params.get('power_gain', 0)
+            
+            details_text = f"  KP={kp:.2f}, KI={ki:.2f}, KD={kd:.2f}, PowerGain={power_gain:.2f}"
+            self.best_config_details_label.config(text=details_text)
+        else:
+            self.best_config_details_label.config(text="")
+    
+    def highlight_new_best_config(self):
+        """Fremhæv at en ny bedste konfiguration er fundet"""
+        # Midlertidig fremhævning af bedste config
+        original_bg = self.best_config_label.cget("background")
+        self.best_config_label.config(background="lightblue")
+        
+        # Gendan normal baggrund efter 3 sekunder
+        self.best_config_label.after(3000, 
+            lambda: self.best_config_label.config(background=original_bg))

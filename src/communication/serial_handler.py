@@ -151,13 +151,13 @@ class SerialThread(threading.Thread):
         return False
 
     def _parse_pid_response(self, line):
-        """Parse PID værdier fra robot response - OPDATERET til at finde alle parametre"""
+        """Parse PID værdier fra robot response - OPDATERET med position control"""
         # Find KP, KI, KD værdier med regex - støt både "=" og ":" format
         kp_match = re.search(r'KP[:\s]+([0-9.]+)', line, re.IGNORECASE)
         ki_match = re.search(r'KI[:\s]+([0-9.]+)', line, re.IGNORECASE)
         kd_match = re.search(r'KD[:\s]+([0-9.]+)', line, re.IGNORECASE)
         
-        # Find Init Balance og Power Gain (forskellige mulige navne)
+        # Find Init Balance og Power Gain
         init_match = re.search(r'InitBal:\s+([0-9.-]+)', line, re.IGNORECASE)
         power_match = re.search(r'Gain:\s+([0-9.-]+)', line, re.IGNORECASE)
         
@@ -178,7 +178,7 @@ class SerialThread(threading.Thread):
                     parsed_params["power_gain"] = float(power_match.group(1))
                 
                 print(f"SUCCESS: Parsed parametre fra robot:")
-                print(f"  KP={parsed_params['kp']}, KI={parsed_params['ki']}, KD={parsed_params['kd']}")
+                print(f"  Balance: KP={parsed_params['kp']}, KI={parsed_params['ki']}, KD={parsed_params['kd']}")
                 if 'init_balance' in parsed_params:
                     print(f"  Init Balance={parsed_params['init_balance']}")
                 if 'power_gain' in parsed_params:
@@ -224,7 +224,7 @@ class SerialThread(threading.Thread):
             elif param == "init_balance":
                 success &= self.send_command(f"init={value}")
                 time.sleep(0.05)
-            elif param == "gain":
+            elif param == "power_gain":
                 success &= self.send_command(f"gain={value}")
                 time.sleep(0.05)
         
@@ -274,7 +274,7 @@ class SerialThread(threading.Thread):
         return False
 
     def _parse_verification_response(self, line):
-        """Parse verification response fra robot"""
+        """Parse verification response fra robot - OPDATERET med position control"""
         try:
             # Parse alle parametre fra robot response
             kp_match = re.search(r'KP[=:\s]+([0-9.-]+)', line, re.IGNORECASE)
@@ -293,7 +293,7 @@ class SerialThread(threading.Thread):
                 if init_match:
                     params["init_balance"] = float(init_match.group(1))
                 if power_match:
-                    params["gain"] = float(power_match.group(1))
+                    params["power_gain"] = float(power_match.group(1))
                 
                 return params
         except ValueError as e:
@@ -302,22 +302,30 @@ class SerialThread(threading.Thread):
         return None
 
     def _verify_parameters_match(self, received, expected):
-        """Verificer at modtagne parametre matcher forventede"""
+        """Verificer at modtagne parametre matcher forventede - TOLERANT for manglende position params"""
         tolerance = 0.01  # Øget tolerance for float sammenligning
         
         print(f"VERIFICERER PARAMETRE:")
         print(f"  Forventet: {expected}")
         print(f"  Modtaget:  {received}")
         
+        # Check kun core balance parametre - ignorer position parametre indtil firmware er opdateret
+        core_params = ['kp', 'ki', 'kd', 'init_balance', 'power_gain']
+        
         for param, expected_value in expected.items():
+                
             # Special handling for gain/power_gain mismatch
             if param == "power_gain" and param not in received and "gain" in received:
                 received_value = received["gain"]
             elif param == "gain" and param not in received and "power_gain" in received:
                 received_value = received["power_gain"]
             elif param not in received:
-                print(f"MISMATCH: Parameter {param} ikke modtaget")
-                return False
+                if param in core_params:
+                    print(f"MISMATCH: Core parameter {param} ikke modtaget")
+                    return False
+                else:
+                    print(f"SKIP: Optional parameter {param} ikke modtaget")
+                    continue
             else:
                 received_value = received[param]
             

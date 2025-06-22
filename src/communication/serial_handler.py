@@ -194,6 +194,7 @@ class SerialThread(threading.Thread):
 
     def send_parameters_with_verification(self, parameters, callback):
         """Send parametre til robot og verificer at de blev modtaget"""
+        print("SERIAL-TRÅD: send_parameters_with_verification kaldes...") # DEBUG
         if not self.is_connected():
             callback(False, "Ikke forbundet til robot")
             return False
@@ -204,6 +205,7 @@ class SerialThread(threading.Thread):
         self.parameter_verification_active = True
         self.verification_timeout = time.time() + 5.0  # 5 sekunder timeout
         self.current_retry = 0
+        print("SERIAL-TRÅD: Parameter verification er nu aktiv. Venter på svar fra robot...") # DEBUG
         
         print(f"SENDER PARAMETRE (forsøg {self.current_retry + 1}/{self.max_retries}):")
         for param, value in parameters.items():
@@ -491,3 +493,20 @@ class SerialThread(threading.Thread):
             'is_open': self.serial_port.is_open,
             'timeout': self.serial_port.timeout
         }
+
+    def send_parameters_no_verification(self, parameters):
+        """Sender en række parameter-kommandoer hurtigt efter hinanden."""
+        if not self.is_connected():
+            print("SERIAL ERROR: Kan ikke sende parametre, ikke forbundet.")
+            return False
+        
+        success = True
+        for param, value in parameters.items():
+            if param == "kp": success &= self.send_command(f"kp={value}")
+            elif param == "ki": success &= self.send_command(f"ki={value}")
+            elif param == "kd": success &= self.send_command(f"kd={value}")
+            elif param == "init_balance": success &= self.send_command(f"init={value}")
+            elif param == "power_gain": success &= self.send_command(f"gain={value}")
+            time.sleep(0.05) # En lille pause er stadig en god idé
+        
+        return success

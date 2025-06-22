@@ -14,6 +14,8 @@ from config.settings import (
     SCORE_OSCILLATION_AMPLITUDE_PENALTY,
     SCORE_OSCILLATION_FREQUENCY_PENALTY,
     SCORE_DEGRADATION_PENALTY,
+    SCORE_POSITION_RMSE_PENALTY,
+    SCORE_SETTLING_TIME_S,
     OSCILLATION_WINDOW_SIZE_S
 )
 
@@ -26,60 +28,62 @@ class ScoreCalculator:
     @staticmethod
     def calculate_run_score(run_data):
         """
-        Beregn oscillation-baseret score for en enkelt testkørsel
-        
-        Args:
-            run_data: Liste af tuples - bagudkompatibel med både gamle og nye format
-            
-        Returns:
-            tuple: (score, valid_time, total_duration, oscillation_metrics)
+        Beregn score baseret på vinkel-oscillation OG positionsstabilitet.
         """
         if not run_data:
             return 0, 0, 0, {}
         
-        # Udtræk data arrays
-        esp_timestamps = np.array([item[0] for item in run_data])
+        # Udtræk data arrays (antager position er den sidste kolonne)
         run_timestamps_relative = np.array([item[1] for item in run_data])
         pitches = np.array([item[2] for item in run_data])
+        positions = np.array([item[-1] for item in run_data])
         
         if run_timestamps_relative.size == 0:
             return 0, 0, 0, {}
 
-        # Beregn total varighed
-        total_duration = run_timestamps_relative[-1] if run_timestamps_relative.size > 0 else 0
+        total_duration = run_timestamps_relative[-1]
+        start_index = 0
+        if run_timestamps_relative[-1] > SCORE_SETTLING_TIME_S:
+            # np.argmax finder det FØRSTE index hvor betingelsen er sand
+            start_index = np.argmax(run_timestamps_relative >= SCORE_SETTLING_TIME_S)
         
-        # Find valid scoring period (før store oscillationer)
+        # Find valid scoring period (før robotten vælter)
         valid_end_idx = ScoreCalculator._find_oscillation_cutoff(pitches)
         
+        print(f"ROBOT INFO: Start Index: {start_index}, Valid End Index: {valid_end_idx}, "
+              f"Total Duration: {total_duration:.2f}s, "
+              f"Run Timestamps: {run_timestamps_relative}, "
+              f"Pitches: {pitches}, "
+              f"Positions: {positions}\n")
+
         if valid_end_idx == 0:
-            return 0, 0, total_duration, {'reason': 'immediate_cutoff'}
+            return -1000, 0, total_duration, {'reason': 'immediate_cutoff'}
             
-        # Brug kun valid data
+        # Brug kun data fra den valide periode
         valid_timestamps = run_timestamps_relative[:valid_end_idx]
         valid_pitches = pitches[:valid_end_idx]
+        valid_positions = positions[:valid_end_idx]
         valid_time = valid_timestamps[-1] if valid_timestamps.size > 0 else 0
         
-        # Check minimum duration requirement
         if valid_time < MIN_VALID_RUN_DURATION_S:
-            return 0, valid_time, total_duration, {'reason': 'too_short', 'required': MIN_VALID_RUN_DURATION_S}
+            return 0, valid_time, total_duration, {'reason': 'too_short'}
         
-        # Beregn oscillation metrics
+        # Beregn alle relevante metrikker
         oscillation_metrics = ScoreCalculator._analyze_oscillations(
-            valid_timestamps, valid_pitches
+            valid_timestamps, valid_pitches, valid_positions
         )
         
-        # Beregn samlet score
+        # Beregn den samlede score
         score = ScoreCalculator._calculate_oscillation_score(
             valid_time, oscillation_metrics
         )
         
-        print(f"ROBOT INFO: Oscillation Score: {score:.2f} "
+        # Opdateret print for bedre debugging
+        print(f"ROBOT INFO: Score: {score:.2f} "
               f"(Valid Tid: {valid_time:.2f}s, "
               f"RMS Amp: {oscillation_metrics.get('amplitude_rms', 0):.3f}°, "
-              f"Freq: {oscillation_metrics.get('avg_frequency', 0):.2f} Hz, "
-              f"Degradation: {oscillation_metrics.get('degradation_factor', 0):.3f})")
+              f"Pos RMSE: {oscillation_metrics.get('position_rmse_m', 0):.4f}m)")
         
-        # Begræns score til rimelig interval
         score = max(-1000, min(1000, score))
         
         return score, valid_time, total_duration, oscillation_metrics
@@ -93,35 +97,32 @@ class ScoreCalculator:
         return len(pitches)
     
     @staticmethod
-    def _analyze_oscillations(timestamps, pitches):
-        """Analysér oscillation amplitude, frekvens og degradation"""
+    def _analyze_oscillations(timestamps, pitches, positions):
+        """Analysér vinkel-oscillation OG positionsafvigelse."""
         if len(timestamps) < 10:
-            return {'amplitude_rms': float('inf'), 'avg_frequency': 0, 'degradation_factor': 0}
+            return {'amplitude_rms': float('inf'), 'avg_frequency': 0, 
+                    'degradation_factor': 0, 'position_rmse_m': float('inf')}
         
-        # Beregn RMS amplitude
+        # Vinkel-analyse (som før)
         amplitude_rms = np.sqrt(np.mean(pitches**2))
-        
-        # Find peaks for frekvens-analyse
         try:
-            dt = np.mean(np.diff(timestamps)) if len(timestamps) > 1 else 0.015
-            sampling_rate = 1.0 / dt if dt > 0 else 66.67
-            
+            dt = np.mean(np.diff(timestamps))
             peaks, _ = signal.find_peaks(np.abs(pitches), height=0.5)
-            if len(peaks) > 1:
-                peak_intervals = np.diff(peaks) * dt
-                avg_frequency = 1.0 / np.mean(peak_intervals) if len(peak_intervals) > 0 else 0
-            else:
-                avg_frequency = 0
+            avg_frequency = 1.0 / np.mean(np.diff(peaks) * dt) if len(peaks) > 1 else 0
         except:
             avg_frequency = 0
-        
-        # Analysér degradation (forværring over tid)
         degradation_factor = ScoreCalculator._calculate_degradation(timestamps, pitches)
+
+        # NYT: Positions-analyse
+        # RMSE måler den effektive gennemsnitlige afstand fra startpunktet (0)
+        position_rmse_m = np.sqrt(np.mean(positions**2)) if len(positions) > 0 else 0
+        print(f"SCORE DEBUG: positions: {positions}, positions_rmse_m: {position_rmse_m:.4f} m\n")
         
         return {
             'amplitude_rms': amplitude_rms,
             'avg_frequency': avg_frequency,
-            'degradation_factor': degradation_factor
+            'degradation_factor': degradation_factor,
+            'position_rmse_m': position_rmse_m
         }
 
     @staticmethod
@@ -154,32 +155,25 @@ class ScoreCalculator:
 
     @staticmethod
     def _calculate_oscillation_score(valid_time, oscillation_metrics):
-        """Beregn score baseret kun på oscillation-kvalitet (tids-uafhængig)"""
-        # Start med perfect score
+        """Beregn score baseret på vinkel-kvalitet OG positionsstabilitet."""
         score = 1000
         
-        # Straf for oscillation amplitude
-        amplitude_rms = oscillation_metrics.get('amplitude_rms', 0)
-        if amplitude_rms != float('inf'):
-            score -= amplitude_rms * SCORE_OSCILLATION_AMPLITUDE_PENALTY
+        # Eksisterende straffe for VINKEL-opførsel
+        score -= oscillation_metrics.get('amplitude_rms', 0) * SCORE_OSCILLATION_AMPLITUDE_PENALTY
+        if oscillation_metrics.get('avg_frequency', 0) > 1.0:
+            score -= (oscillation_metrics.get('avg_frequency', 0) - 1.0) * SCORE_OSCILLATION_FREQUENCY_PENALTY
+        score -= oscillation_metrics.get('degradation_factor', 0) * SCORE_DEGRADATION_PENALTY
         
-        # Straf for høj frekvens (ustabil)
-        avg_frequency = oscillation_metrics.get('avg_frequency', 0)
-        if avg_frequency > 1.0:  # Over 1 Hz er ustabilt
-            score -= (avg_frequency - 1.0) * SCORE_OSCILLATION_FREQUENCY_PENALTY
+        # NYT: Straf for fysisk POSITIONS-afvigelse (rokken frem og tilbage)
+        position_rmse = oscillation_metrics.get('position_rmse_m', 0)
+        score -= position_rmse * SCORE_POSITION_RMSE_PENALTY
         
-        # Straf for degradation over tid
-        degradation = oscillation_metrics.get('degradation_factor', 0)
-        score -= degradation * SCORE_DEGRADATION_PENALTY
-        
-        # Bonus for meget lav amplitude (meget stabil)
-        if amplitude_rms < 1.0:
-            score += (1.0 - amplitude_rms) * 50  # Øget bonus for stabilitet
-        
-        # Bonus for lav frekvens (rolig balance)
-        if avg_frequency < 0.5:
-            score += (0.5 - avg_frequency) * 30
-        
+        # Bonusser (uændret)
+        if oscillation_metrics.get('amplitude_rms', 0) < 1.0:
+            score += (1.0 - oscillation_metrics.get('amplitude_rms', 0)) * 50
+        if oscillation_metrics.get('avg_frequency', 0) < 0.5:
+            score += (0.5 - oscillation_metrics.get('avg_frequency', 0)) * 30
+            
         return score
 
     @staticmethod

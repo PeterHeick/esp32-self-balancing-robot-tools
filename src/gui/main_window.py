@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
 from collections import deque
+import re # <-- TILFØJ DENNE IMPORT
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import datetime
@@ -30,9 +31,12 @@ class RobotPerformanceApp:
     Hovedapplikation for Robot Performance System
     """
     
+    # ... __init__ og GUI setup metoder forbliver UÆNDREDE ...
+    # ... (fra __init__ til _setup_plot) ...
+
     def __init__(self, root_window):
         self.root = root_window
-        self.root.title("Robot Performance & Tuning v1.5 (Komplet)")
+        self.root.title("Robot Performance & Tuning v1.6 (ESP32 Score-beregning)") # Opdateret titel
         
         # Core components
         saved_pid_params, saved_best_config = load_pid_settings()
@@ -54,6 +58,7 @@ class RobotPerformanceApp:
         self.autotuner = None
         self.countdown_timer_id = None
         self.autostop_timer_id = None
+        self.score_watchdog_timer_id = None
         
         # Plot data
         self.plot_time_data = deque()
@@ -72,9 +77,9 @@ class RobotPerformanceApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     # ===================================================================
-    #   GUI SETUP METODER
+    #   GUI SETUP METODER (Uændret)
     # ===================================================================
-
+    
     def _setup_gui(self):
         main_frame = ttk.Frame(self.root, padding="10"); main_frame.grid(row=0, column=0, sticky="nsew")
         self.root.grid_columnconfigure(0, weight=1); self.root.grid_rowconfigure(0, weight=1)
@@ -194,9 +199,9 @@ class RobotPerformanceApp:
         self.canvas.draw()
     
     # ===================================================================
-    #   AUTO-TUNING LOGIK
+    #   AUTO-TUNING LOGIK (Uændret)
     # ===================================================================
-
+    
     def toggle_auto_tuning(self):
         """Starter eller stopper den automatiske tuning proces."""
         if self.is_auto_tuning:
@@ -248,6 +253,9 @@ class RobotPerformanceApp:
         self.ki_var.set(next_pid_params['ki'])
         self.kd_var.set(next_pid_params['kd'])
         
+        # Her er den eksisterende logik perfekt: den anvender parametre, venter på verifikation,
+        # og starter så testen. Resultatet bliver fanget af den nye _handle_score_result,
+        # som så kalder _autotune_tick igen.
         def on_params_verified(success, message):
             """Denne funktion kaldes, NÅR verifikationen er færdig."""
             if not self.is_auto_tuning: return
@@ -306,7 +314,7 @@ class RobotPerformanceApp:
             print(f"AUTO-TUNE ERROR: Kunne ikke skrive til logfil {filename}: {e}")
 
     # ===================================================================
-    #   KERNE LOGIK OG HÅNDTERING
+    #   KERNE LOGIK OG HÅNDTERING (ÆNDRET)
     # ===================================================================
     
     def _dispatch_serial_data_to_gui(self, line):
@@ -316,17 +324,113 @@ class RobotPerformanceApp:
         self.root.after_idle(lambda: self.status_widgets.update_serial_status(message))
 
     def _process_incoming_line(self, line):
-        if line.startswith(TAG_CSV): self._handle_csv_data(line)
-        elif line.startswith(TAG_FALLEN) and self.is_running_test: self._stop_current_run("Væltet (Signal fra Robot)")
-        elif line.startswith(TAG_INFO): print(f"ROBOT INFO: {line[len(TAG_INFO):].strip()}")
+        # NYT: Håndter den nye score-resultat-tag
+        if line.startswith("TAG_SCORE_RESULT:"):
+            self._handle_score_result(line)
+        elif line.startswith(TAG_CSV):
+            self._handle_csv_data(line)
+        elif line.startswith(TAG_FALLEN) and self.is_running_test:
+            self._stop_current_run("Væltet (Signal fra Robot)")
+        elif line.startswith(TAG_INFO):
+            print(f"ROBOT INFO: {line[len(TAG_INFO):].strip()}")
         elif line.startswith(TAG_ERROR):
             msg = line[len(TAG_ERROR):].strip()
             print(f"ROBOT ERROR: {msg}")
             if not self.is_auto_tuning: messagebox.showerror("Robot Fejl", msg)
         else:
-            if not any(tag in line for tag in ["KP:", "KI:", "KD:"]): print(f"ROBOT UNTAGGED: {line}")
+            if not any(tag in line for tag in ["KP:", "KI:", "KD:"]):
+                print(f"ROBOT UNTAGGED: {line}")
     
+    # NY METODE: Håndterer resultatet fra robotten
+    def _handle_score_result(self, line):
+        # Når vi modtager en score, skal watchdog-timeren annulleres.
+        if self.score_watchdog_timer_id:
+            self.root.after_cancel(self.score_watchdog_timer_id)
+            self.score_watchdog_timer_id = None
+
+        """Parse TAG_SCORE_RESULT og håndter data."""
+        print(f"PYTHON RECEIVED SCORE: {line}")
+        try:
+            # Gør parsing mere robust over for variationer i output
+            content = line.replace("TAG_SCORE_RESULT:", "").strip()
+            
+            # Håndter fejl-case fra robotten
+            if "status=fail" in content or "status=error" in content:
+                print(f"Score-beregning fejlede på robot: {content}")
+                score = -1000 # Tildel en straf-score
+                valid_time = 0
+                metrics = {}
+            else:
+                # Brug regex til at finde alle key=value par
+                pairs = re.findall(r'([a-zA-Z_]+)\s*=\s*([0-9.-]+)', content)
+                data = {key: float(value) for key, value in pairs}
+                
+                score = data.get('score', 0)
+                valid_time = data.get('valid_time', 0)
+                
+                # Opret en 'metrics' ordbog, der ligner den, ScoreCalculator.py ville lave
+                metrics = {
+                    'amplitude_rms': data.get('rms_amp', 0),
+                    'position_rmse_m': data.get('pos_rmse', 0),
+                    # Disse er ikke længere beregnet i Python, men kan tilføjes for fuldstændighed
+                    'avg_frequency': 0, 
+                    'degradation_factor': 0
+                }
+
+            # Saml resultaterne i det format, session manageren forventer
+            # (score, valid_time, total_duration, oscillation_metrics)
+            # Vi bruger valid_time som en erstatning for total_duration
+            run_results = (score, valid_time, valid_time, metrics)
+
+            # Denne logik er flyttet fra _stop_current_run
+            if self.is_auto_tuning:
+                current_job_params = self.autotuner.jobs[self.autotuner.current_job_index - 1]
+                self.log_autotune_result(current_job_params, score)
+                self.root.after(1000, self._autotune_tick) # Fortsæt til næste auto-tune job
+            else: # Manuel kørsel logik
+                self.status_widgets.update_run_status("Resultat modtaget fra robot.")
+                self.status_widgets.update_run_results(score, valid_time)
+                if valid_time >= MIN_VALID_RUN_DURATION_S:
+                    self.session_manager.add_run_result(run_results)
+                    # Vi kan stadig logge de detaljerede data, vi har modtaget
+                    self.data_logger.write_detailed_run_data(
+                        self.session_manager.get_detailed_log_filename(), 
+                        self.current_run_data
+                    )
+                    self.status_widgets.update_session_info(self.session_manager)
+                else:
+                     self.status_widgets.update_run_status(
+                         f"Resultat modtaget. For kort ({valid_time:.2f}s) til logning."
+                     )
+
+        except Exception as e:
+            print(f"FEJL ved parsing af score-resultat: {e}\nLinje var: {line}")
+            if self.is_auto_tuning:
+                # Giv en straf-score og fortsæt
+                current_job_params = self.autotuner.jobs[self.autotuner.current_job_index - 1]
+                self.log_autotune_result(current_job_params, -1000)
+                self.root.after(1000, self._autotune_tick)
+
+
+    def _on_score_timeout(self):
+        """Kaldes af watchdog-timeren, hvis et score-resultat ikke modtages i tide."""
+        self.score_watchdog_timer_id = None
+        if not self.is_auto_tuning:
+            return
+
+        print("WATCHDOG: Timeout - modtog ikke score fra robot. Fortsætter til næste test.")
+        self.status_widgets.update_run_status("Timeout! Starter næste test...")
+
+        # Log en straf-score for det job, der fejlede
+        if self.autotuner.current_job_index > 0:
+            failed_job_params = self.autotuner.jobs[self.autotuner.current_job_index - 1]
+            self.log_autotune_result(failed_job_params, -1000)
+
+        # Tving næste test i gang
+        self.root.after(500, self._autotune_tick)
+
     def _handle_csv_data(self, line):
+        # Denne funktion er nu primært for live-grafen. Logikken er uændret.
         if not self.is_running_test: return
         try:
             csv_data_part = line[len(TAG_CSV):].strip()
@@ -352,12 +456,19 @@ class RobotPerformanceApp:
         except (ValueError, IndexError): pass
 
     def _apply_pid_parameters(self):
-        """Manuel anvendelse af PID parametre."""
+        # Uændret - den eksisterende logik er fin
         if self.is_running_test:
             messagebox.showerror("Fejl", "Stop testkørsel før parametre ændres.")
             return
 
-        new_pid_params = {"kp": self.kp_var.get(), "ki": self.ki_var.get(), "kd": self.kd_var.get(), "init_balance": self.init_balance_var.get(), "power_gain": self.power_gain_var.get()}
+        new_pid_params = {
+          "kp": self.kp_var.get(),
+          "ki": self.ki_var.get(),
+          "kd": self.kd_var.get(),
+          "init_balance": self.init_balance_var.get(),
+          "power_gain": self.power_gain_var.get()}
+
+        print(f"Anvender nye PID-parametre: {new_pid_params}")
         
         def on_manual_verify_complete(success, message):
             self.apply_pid_params_button.config(state="normal", text="Anvend Alle Parametre")
@@ -374,9 +485,15 @@ class RobotPerformanceApp:
         self._apply_pid_parameters_with_callback(on_manual_verify_complete)
 
     def _apply_pid_parameters_with_callback(self, on_complete):
-        """Hjælpefunktion til at sende parametre og håndtere callback."""
+        # Opdateret til at inkludere init_balance
         try:
-            new_pid_params = {"kp": self.kp_var.get(), "ki": self.ki_var.get(), "kd": self.kd_var.get(), "init_balance": self.init_balance_var.get(), "power_gain": self.power_gain_var.get()}
+            new_pid_params = {
+                "kp": self.kp_var.get(), 
+                "ki": self.ki_var.get(), 
+                "kd": self.kd_var.get(), 
+                "init_balance": self.init_balance_var.get(),
+                "power_gain": self.power_gain_var.get()
+            }
             if self.serial_thread.is_connected():
                 self.serial_thread.send_parameters_with_verification(new_pid_params, on_complete)
             else:
@@ -386,15 +503,16 @@ class RobotPerformanceApp:
 
 
     def _toggle_test_run(self):
-        """Start/stop manuel test kørsel."""
+        # Uændret - den eksisterende logik er fin
         if self.is_auto_tuning:
             messagebox.showinfo("Info", "Kan ikke starte manuel test, mens auto-tuning kører.")
             return
         if not self.is_running_test: self._start_test_run()
         else: self._stop_current_run("Manuelt stoppet")
 
+    # ÆNDRET: Start testkørsel med nye kommandoer
     def _start_test_run(self):
-        """Starter en testkørsel. Bruges af både manuel og automatisk start."""
+        """Starter en testkørsel med de nye `score_start` og `csv_on` kommandoer."""
         if not self.serial_thread.is_connected():
             if not self.is_auto_tuning: messagebox.showerror("Fejl", "Ingen seriel forbindelse.")
             return
@@ -412,10 +530,13 @@ class RobotPerformanceApp:
             self.start_stop_button.config(text="Stop Testkørsel")
             self.status_widgets.update_run_status("Testkørsel aktiv...")
         
-        self.serial_thread.send_command("csv_on")
+        # Send de nye kommandoer
+        self.serial_thread.send_command("score_start") # Start scoring på ESP32
+        self.serial_thread.send_command("csv_on")      # Start CSV-stream til live-graf
 
+    # ÆNDRET: Stop testkørsel med nye kommandoer og fjern lokal scoreberegning
     def _stop_current_run(self, reason="Ukendt"):
-        """Stopper den nuværende testkørsel og håndterer resultatet."""
+        """Stopper den nuværende testkørsel og beder robotten om resultatet."""
         if self.autostop_timer_id:
             self.root.after_cancel(self.autostop_timer_id)
             self.autostop_timer_id = None
@@ -429,33 +550,24 @@ class RobotPerformanceApp:
         self.ax.set_title("Pitch (grader)", color='black')
         self.canvas.draw_idle()
         
-        if self.serial_thread.is_connected(): 
-            self.serial_thread.send_command("csv_off")
+        if self.serial_thread.is_connected():  
+            self.serial_thread.send_command("score_stop") # Bed ESP32 om at stoppe og sende score
+            self.serial_thread.send_command("csv_off")    # Stop CSV-stream
 
-        run_results = self.score_calculator.calculate_run_score(self.current_run_data)
-        score, valid_time, _, _ = run_results
+        # FJERNET: Lokal scoreberegning er ikke længere nødvendig.
+        # Al resultat-logik er flyttet til `_handle_score_result`,
+        # som bliver kaldt, når robotten sender sit svar.
 
-        if self.is_auto_tuning:
-            current_job_params = self.autotuner.jobs[self.autotuner.current_job_index - 1]
-            self.log_autotune_result(current_job_params, score)
-            self.root.after(1000, self._autotune_tick)
-        else: # Manuel kørsel logik
+        # Opdater GUI til at vise, at vi venter på svar.
+        if not self.is_auto_tuning:
             self.start_stop_button.config(text="Start Testkørsel")
-            self.status_widgets.update_run_status(f"Testkørsel stoppet: {reason}")
-            self.status_widgets.update_run_results(score, valid_time)
-            if valid_time >= MIN_VALID_RUN_DURATION_S:
-                self.session_manager.add_run_result(run_results)
-                self.data_logger.write_detailed_run_data(self.session_manager.get_detailed_log_filename(), self.current_run_data)
-                self.status_widgets.update_session_info(self.session_manager)
-            elif self.current_run_data:
-                self.status_widgets.update_run_status(f"Testkørsel stoppet: {reason}. For kort ({valid_time:.2f}s) til logning.")
-            else:
-                self.status_widgets.update_run_status(f"Testkørsel stoppet: {reason}. Ingen data modtaget.")
-    
-    # ===================================================================
-    #   ØVRIGE HJÆLPEMETODER
-    # ===================================================================
-    
+            self.status_widgets.update_run_status(f"Test stoppet: {reason}. Venter på score fra robot...")
+        else:
+            # For auto-tuning, start en watchdog. Hvis vi ikke får svar inden for 3 sekunder,
+            # tvinger vi processen videre.
+            self.status_widgets.update_run_status(f"Test stoppet: {reason}. Venter på score...")
+            self.score_watchdog_timer_id = self.root.after(3000, self._on_score_timeout)
+
     def on_closing(self):
         if messagebox.askokcancel("Luk", "Vil du afslutte programmet?"):
             self.is_auto_tuning = False

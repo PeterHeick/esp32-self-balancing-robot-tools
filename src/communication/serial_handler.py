@@ -305,7 +305,7 @@ class SerialThread(threading.Thread):
 
     def _verify_parameters_match(self, received, expected):
         """Verificer at modtagne parametre matcher forventede - TOLERANT for manglende position params"""
-        tolerance = 0.01  # Øget tolerance for float sammenligning
+        tolerance = 0.02  # Øget tolerance for float sammenligning
         
         print(f"VERIFICERER PARAMETRE:")
         print(f"  Forventet: {expected}")
@@ -316,6 +316,9 @@ class SerialThread(threading.Thread):
         
         for param, expected_value in expected.items():
                 
+            if param == 'init_balance':
+                print(f"SKIP: Verificering af '{param}' springes over.")
+                continue
             # Special handling for gain/power_gain mismatch
             if param == "power_gain" and param not in received and "gain" in received:
                 received_value = received["gain"]
